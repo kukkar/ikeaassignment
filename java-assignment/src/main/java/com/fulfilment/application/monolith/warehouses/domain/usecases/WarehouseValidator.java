@@ -8,15 +8,11 @@ import java.util.Map;
 /**
  * Request-shape validation shared by warehouse creation and replacement.
  *
- * <p>Creation has no prior state to compare against, so "stock must not exceed capacity" is
- * validated as a plain cross-field rule there. Replacement, however, has its own more specific
- * rules for the same underlying concern - the new stock must equal the warehouse being replaced,
- * and the new capacity must accommodate that stock ({@link StockMismatchException} /
- * {@link com.fulfilment.application.monolith.warehouses.domain.exceptions.InsufficientCapacityException}).
- * Applying the generic cross-field check there too would make those two exceptions unreachable
- * (given equal stock and stock &lt;= capacity, capacity &gt;= old stock always holds), so
- * replacement uses {@link #validateShape} - field-level checks only - and leaves the cross-field
- * comparison to those replacement-specific rules.
+ * <p>Creation validates "stock &lt;= capacity" as a plain cross-field rule. Replacement has its
+ * own, more specific rules for the same concern (stock must equal the old warehouse's stock;
+ * capacity must accommodate it) - applying the generic check there too would make those
+ * replacement-specific exceptions unreachable, so replacement uses {@link #validateShape}
+ * (field-level checks only) and leaves the cross-field comparison to its own rules.
  */
 final class WarehouseValidator {
 

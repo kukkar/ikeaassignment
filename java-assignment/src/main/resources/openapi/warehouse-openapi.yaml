@@ -32,9 +32,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Warehouse'
-        
         '400':
           description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: An active warehouse already exists for this business unit code, or the location's warehouse-count/capacity limit would be exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
 
   /warehouse/{businessUnitCode}:
     get:
@@ -55,6 +64,10 @@ paths:
                 $ref: '#/components/schemas/Warehouse'
         '404':
           description: Warehouse unit not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
     delete:
       summary: Archive the active warehouse unit by business unit code
       parameters:
@@ -69,13 +82,17 @@ paths:
           description: Warehouse unit archived
         '404':
           description: Warehouse unit not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
 
   /warehouse/{businessUnitCode}/replacement:
     post:
       summary: Replace the current active Warehouse
-      description: | 
+      description: |
         Replaces the current active Warehouse identified by `businessUnitCode` unit by a new Warehouse provided in the request body
-        A Warehouse can be replaced by another Warehouse with the same Business Unit Code. 
+        A Warehouse can be replaced by another Warehouse with the same Business Unit Code.
         That means that the previous Warehouse will be archived and the new Warehouse will be created assuming its place.
       parameters:
         - name: businessUnitCode
@@ -97,28 +114,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Warehouse'
-        '404':
-          description: Warehouse unit not found
-
         '400':
           description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Warehouse unit not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Stock/capacity mismatch with the warehouse being replaced, or the location's warehouse-count/capacity limit would be exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
 components:
   schemas:
     Warehouse:
       type: object
+      required:
+        - businessUnitCode
+        - location
+        - capacity
+        - stock
       properties:
         businessUnitCode:
           type: string
+          minLength: 1
           description: The public, unique identifier of the *active* warehouse. Database row IDs are internal.
           example: "MWH.001"
         location:
           type: string
+          minLength: 1
           example: "AMSTERDAM-001"
         capacity:
           type: integer
+          minimum: 1
           example: 100
         stock:
           type: integer
+          minimum: 0
           example: 50
         createdAt:
           type: string
@@ -130,3 +170,24 @@ components:
           readOnly: true
           nullable: true
           description: Null while the warehouse is active; set once it has been archived (e.g. replaced).
+
+    ApiError:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable error type.
+          example: "CONFLICT"
+        message:
+          type: string
+          description: Human-readable error message.
+          example: "An active warehouse already exists for business unit code 'MWH.001'"
+        details:
+          type: object
+          nullable: true
+          description: Optional per-field validation details, present for VALIDATION errors.
+          additionalProperties:
+            type: string

@@ -11,13 +11,11 @@ import org.jboss.logging.Logger;
 /**
  * Bridges committed {@code Store} changes to the legacy system.
  *
- * <p>Observers are registered with {@link TransactionPhase#AFTER_SUCCESS}, so they only run once
- * the transaction that produced the event has committed - never before, and never on rollback.
- * Because the database change is already durable by the time these methods run, a downstream
- * failure here cannot be rolled back; it is logged so it stays observable/alertable instead of
- * being silently swallowed. See the "Store after-commit integration" note in README.md for why a
- * transactional outbox is the production-grade evolution of this approach (guaranteed delivery,
- * retries, idempotency, crash recovery).
+ * <p>Observers run at {@link TransactionPhase#AFTER_SUCCESS}: only once the transaction that
+ * produced the event has committed, never before, never on rollback. The write is already durable
+ * by then, so a downstream failure here can't be rolled back - it's logged, not swallowed. See
+ * README.md ("Store after-commit mechanism") for why a transactional outbox is the production-grade
+ * evolution of this.
  */
 @ApplicationScoped
 public class StoreLegacySyncListener {
