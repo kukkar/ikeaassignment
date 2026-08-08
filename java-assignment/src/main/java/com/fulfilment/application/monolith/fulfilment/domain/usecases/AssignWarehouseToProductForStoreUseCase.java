@@ -28,6 +28,18 @@ import java.util.Set;
  * to the currently active warehouse - the same port {@code CreateWarehouseUseCase} and {@code
  * ReplaceWarehouseUseCase} use - so a warehouse replacement (same code, new active row) is
  * transparent here: nothing needs to change for existing assignments to keep resolving correctly.
+ *
+ * <p>The active-warehouse check uses {@link WarehouseStore#lockActiveByBusinessUnitCode}, not the
+ * plain read - the same row lock {@code ReplaceWarehouseUseCase} already takes on itself. Without
+ * it, the check-then-insert here would race a concurrent archive/replace of the same warehouse: a
+ * plain read holds no lock, so nothing would stop that other transaction from archiving the
+ * warehouse and committing between this check and the insert below, leaving a brand new assignment
+ * pointing at an archived-only warehouse. Taking the row lock here means a concurrent archive
+ * blocks until this transaction commits (fine - the assignment was created against a genuinely
+ * active warehouse, archiving it a moment later is the normal "archive without replacement"
+ * behaviour), and a concurrent archive/replace that gets there first causes this call to correctly
+ * observe "not found" once its blocked read re-checks the row's committed state - never a stale
+ * "active" read. See README.md ("Concurrency: active-warehouse race").
  */
 @ApplicationScoped
 public class AssignWarehouseToProductForStoreUseCase implements AssignWarehouseToProductForStoreOperation {
@@ -63,7 +75,7 @@ public class AssignWarehouseToProductForStoreUseCase implements AssignWarehouseT
     if (!catalogGateway.productExists(productId)) {
       throw new ProductNotFoundException(productId);
     }
-    if (warehouseStore.findActiveByBusinessUnitCode(warehouseBusinessUnitCode) == null) {
+    if (warehouseStore.lockActiveByBusinessUnitCode(warehouseBusinessUnitCode) == null) {
       throw new WarehouseNotFoundException(warehouseBusinessUnitCode);
     }
 

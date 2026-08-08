@@ -8,12 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fulfilment.application.monolith.fulfilment.adapters.database.FulfilmentAssignmentRepository;
+import com.fulfilment.application.monolith.fulfilment.domain.models.FulfilmentAssignment;
 import com.fulfilment.application.monolith.warehouses.adapters.database.WarehouseRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -479,6 +482,66 @@ public class FulfilmentAssignmentResourceTest {
       assertEquals(2, successCount.get(), "the rule-1 limit of 2 distinct warehouses must never be exceeded");
       assertEquals(1, conflictCount.get());
       assertTrue(fulfilmentAssignmentRepository.distinctWarehousesForStoreAndProduct(1L, 1L).size() <= 2);
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  /**
+   * Smoke test at the HTTP level for the active-warehouse race fix: fires concurrent archive and
+   * assign requests at the same warehouse and checks the outcome is always one of the two valid
+   * combinations. This is necessarily a coarse check - HTTP-level request timing can't force true
+   * transaction overlap (the two requests may simply run one after the other), and outcome
+   * timestamps can't be used to infer commit order either, since {@code ArchiveWarehouseUseCase}
+   * computes its {@code archivedAt} value in application code *before* the (potentially blocking)
+   * update statement runs, not at actual commit time - so a timestamp comparison would not reflect
+   * real database ordering. The actual mechanism - that {@code lockActiveByBusinessUnitCode}
+   * genuinely blocks a concurrent {@code archiveActive} at the database level - is proven
+   * deterministically, with explicit transaction control, by {@code WarehouseRepositoryTest
+   * #testLockActiveByBusinessUnitCodeBlocksAConcurrentArchive}.
+   */
+  @Test
+  public void testConcurrentArchiveAndAssignAlwaysProducesAValidOutcome() throws Exception {
+    String code = "FUL.RACE.1";
+    createWarehouse(code, "VETSBY-001", 10, 1);
+    try {
+      ExecutorService executor = Executors.newFixedThreadPool(2);
+      CountDownLatch startLatch = new CountDownLatch(1);
+
+      Callable<Integer> assignAttempt =
+          () -> {
+            startLatch.await();
+            return given()
+                .contentType("application/json")
+                .body(payload(1L, code))
+                .when()
+                .post(path(1L))
+                .then()
+                .extract()
+                .statusCode();
+          };
+      Callable<Integer> archiveAttempt =
+          () -> {
+            startLatch.await();
+            return given().when().delete("/warehouse/" + code).then().extract().statusCode();
+          };
+
+      Future<Integer> assignFuture = executor.submit(assignAttempt);
+      Future<Integer> archiveFuture = executor.submit(archiveAttempt);
+      startLatch.countDown();
+      int assignStatus = assignFuture.get(30, TimeUnit.SECONDS);
+      int archiveStatus = archiveFuture.get(30, TimeUnit.SECONDS);
+      executor.shutdown();
+
+      assertEquals(204, archiveStatus, "the warehouse must always end up archived exactly once");
+      assertTrue(
+          assignStatus == 201 || assignStatus == 404,
+          "the assignment must either be created against a genuinely active warehouse, or be "
+              + "correctly rejected as not found - never anything else, got: "
+              + assignStatus);
+
+      List<FulfilmentAssignment> assignments = fulfilmentAssignmentRepository.listByStoreAndProduct(1L, 1L);
+      assertEquals(assignStatus == 201 ? 1 : 0, assignments.size());
     } finally {
       deleteAssignmentsFor(1L, 1L);
     }

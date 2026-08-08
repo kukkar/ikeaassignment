@@ -242,6 +242,44 @@ level too (mirroring the warehouse partial-index precedent), for defense in dept
 that bypasses the use case. Deletion needs no locking: removing an assignment can only free
 capacity against a limit, never violate one.
 
+**Concurrency: active-warehouse race.** The three advisory locks above are internal to the
+fulfilment module - warehouse archive/replace never acquires them, and never has any reason to.
+That's fine for the three business limits (fulfilment-only concerns), but the initial
+implementation's active-warehouse *existence* check was a plain, unlocked read
+(`WarehouseStore.findActiveByBusinessUnitCode`) taken *before* any lock was acquired. A concurrent
+archive of the same warehouse could commit in the window between that check and the eventual
+insert, leaving a brand new assignment pointing at a warehouse that was already archived-only by
+the time the row was written - directly contradicting "new assignments require an active
+warehouse."
+
+The fix: that check now uses `WarehouseStore.lockActiveByBusinessUnitCode` - the same row lock
+(`SELECT ... FOR UPDATE`) `ReplaceWarehouseUseCase` already takes on itself for the identical
+reason. This closes the race against **both** archive and replace uniformly, since both already
+funnel through that one method:
+- If the assign transaction gets there first, a concurrent archive/replace blocks until it commits
+  - correct, since the assignment was created against a genuinely active, now-locked warehouse;
+  archiving it a moment later is the ordinary "archive without replacement" outcome above.
+- If archive/replace gets there first, the assign transaction's blocked read re-checks the row's
+  committed state once the lock is released and correctly observes "not found" - never a stale
+  "active" snapshot.
+- One deliberate, documented trade-off: losing a race against a concurrent **replace** specifically
+  returns 404 even though a new active row with the same code exists a moment later - PostgreSQL's
+  lock-wait re-check only re-evaluates the specific row that was blocked on, not newly-inserted
+  rows, so the caller sees "not found" and should retry. This mirrors the identical, pre-existing
+  trade-off `ReplaceWarehouseUseCase` already has for concurrent replace-vs-replace.
+
+No new deadlock risk: the only resource assign() and archive/replace share is that single warehouse
+row, and archive/replace never touch fulfilment's advisory locks, so no lock-acquisition cycle is
+possible between them. Verified two ways: `WarehouseRepositoryTest#testLockActiveByBusinessUnitCodeBlocksAConcurrentArchive`
+proves the row lock deterministically blocks a concurrent `archiveActive`, using explicit
+transaction control (two real, concurrently-open transactions, no reliance on request timing) -
+this is the actual mechanism the fix depends on. `FulfilmentAssignmentResourceTest#testConcurrentArchiveAndAssignAlwaysProducesAValidOutcome`
+is a coarser HTTP-level smoke test on top: it cannot force true transaction overlap, and - a real
+pitfall hit while writing it - `archivedAt` is computed in application code *before* the
+(potentially blocking) update statement runs, not at actual commit time, so comparing it against
+the assignment's `createdAt` does not reliably reflect database commit order and was dropped as an
+invalid check.
+
 **Database.** `fulfilment_assignment(id, store_id, product_id, warehouse_business_unit_code,
 created_at)`, generated from `@Table` on `DbFulfilmentAssignment` with indexes on `store_id`,
 `(store_id, product_id)`, and `warehouse_business_unit_code`, plus the unique constraint above.
@@ -295,7 +333,9 @@ this bonus needs from those modules.
   fast, Quarkus-free Mockito unit tests covering every validation branch in the assignment.
 - `WarehouseRepositoryTest` - `@QuarkusTest` + real Postgres: active queries exclude archived rows,
   capacity/count queries exclude archived rows, historical rows may share a code, the partial
-  unique index rejects a second active row.
+  unique index rejects a second active row, and (bonus-driven) `lockActiveByBusinessUnitCode`
+  deterministically blocks a concurrent `archiveActive` on the same row, proven with explicit,
+  concurrently-open transactions rather than request timing.
 - `WarehouseResourceTest` - `@QuarkusTest` + RestAssured, structured JSON assertions: happy paths,
   representative 400/404/409s, replacement's atomic rollback (state verified via the repository),
   the concurrency invariant above.
@@ -311,9 +351,10 @@ this bonus needs from those modules.
   violations at the database level.
 - `FulfilmentAssignmentResourceTest` (bonus) - `@QuarkusTest` + RestAssured: happy paths,
   representative 400/404/409s, the warehouse-replacement and archive-without-replacement
-  interactions, and two concurrency tests - identical concurrent requests yield exactly one
-  persisted row, and racing distinct warehouses against the rule-1 limit never exceeds it
-  regardless of which request wins.
+  interactions, three concurrency tests - identical concurrent requests yield exactly one
+  persisted row, racing distinct warehouses against the rule-1 limit never exceeds it regardless of
+  which request wins, and a concurrent archive-vs-assign smoke test - and a dedicated unit test
+  confirming the active-warehouse check uses the locking read, not the plain one.
 
 Run the fast suite with `./mvnw test`; run everything, including the packaged-jar smoke test, with
 `./mvnw verify`. Both require Docker (for Quarkus Dev Services' PostgreSQL container) unless a

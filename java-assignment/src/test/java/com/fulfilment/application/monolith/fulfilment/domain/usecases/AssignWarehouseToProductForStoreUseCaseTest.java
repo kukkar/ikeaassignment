@@ -53,7 +53,7 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
 
     when(catalogGateway.storeExists(STORE_ID)).thenReturn(true);
     when(catalogGateway.productExists(PRODUCT_ID)).thenReturn(true);
-    when(warehouseStore.findActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(new Warehouse());
+    when(warehouseStore.lockActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(new Warehouse());
     when(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(STORE_ID, PRODUCT_ID))
         .thenReturn(Set.of());
     when(fulfilmentAssignmentStore.distinctWarehousesForStore(STORE_ID)).thenReturn(Set.of());
@@ -94,7 +94,7 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
 
   @Test
   void testUnknownWarehouseCodeIsRejected() {
-    when(warehouseStore.findActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(null);
+    when(warehouseStore.lockActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(null);
 
     assertThrows(
         WarehouseNotFoundException.class, () -> useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE));
@@ -103,13 +103,27 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
 
   @Test
   void testArchivedOnlyWarehouseCodeIsRejectedTheSameWayAsUnknown() {
-    // WarehouseStore.findActiveByBusinessUnitCode already returns null once every row for a code
+    // WarehouseStore.lockActiveByBusinessUnitCode already returns null once every row for a code
     // is archived - the use case doesn't need to (and can't) distinguish "never existed" from
     // "archived with no active replacement".
-    when(warehouseStore.findActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(null);
+    when(warehouseStore.lockActiveByBusinessUnitCode(WAREHOUSE_CODE)).thenReturn(null);
 
     assertThrows(
         WarehouseNotFoundException.class, () -> useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE));
+  }
+
+  @Test
+  void testActiveWarehouseCheckUsesTheLockingReadNotThePlainOne() {
+    // Regression test for the active-warehouse race: a plain read (WarehouseStore.
+    // findActiveByBusinessUnitCode) holds no lock, so nothing would stop a concurrent archive/
+    // replace from committing between this check and the eventual insert. The locking variant
+    // (SELECT ... FOR UPDATE) is what ReplaceWarehouseUseCase already uses to protect itself from
+    // the same kind of race against a concurrent archive of the same warehouse row - this use case
+    // must use it too.
+    useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
+
+    verify(warehouseStore).lockActiveByBusinessUnitCode(WAREHOUSE_CODE);
+    verify(warehouseStore, never()).findActiveByBusinessUnitCode(any());
   }
 
   @Test
