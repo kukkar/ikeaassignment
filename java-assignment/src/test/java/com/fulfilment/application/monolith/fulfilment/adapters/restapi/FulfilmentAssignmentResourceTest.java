@@ -1,0 +1,486 @@
+package com.fulfilment.application.monolith.fulfilment.adapters.restapi;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fulfilment.application.monolith.fulfilment.adapters.database.FulfilmentAssignmentRepository;
+import com.fulfilment.application.monolith.warehouses.adapters.database.WarehouseRepository;
+import io.quarkus.narayana.jta.QuarkusTransaction;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
+import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Every test cleans up the assignments (and any scratch warehouses) it creates, for the same
+ * reason {@code WarehouseResourceTest} does: {@code @QuarkusTest} does not roll back the database
+ * between test methods, and the fulfilment limits are stateful across a shared store/warehouse.
+ */
+@QuarkusTest
+public class FulfilmentAssignmentResourceTest {
+
+  @Inject FulfilmentAssignmentRepository fulfilmentAssignmentRepository;
+  @Inject WarehouseRepository warehouseRepository;
+
+  private static Map<String, Object> payload(Long productId, String warehouseCode) {
+    return Map.of("productId", productId, "warehouseBusinessUnitCode", warehouseCode);
+  }
+
+  private static String path(Long storeId) {
+    return "/stores/" + storeId + "/fulfilment-assignments";
+  }
+
+  private void deleteAssignmentsFor(Long storeId, Long productId) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () ->
+                fulfilmentAssignmentRepository
+                    .listByStoreAndProduct(storeId, productId)
+                    .forEach(a -> fulfilmentAssignmentRepository.deleteByIdForStore(a.id, storeId)));
+  }
+
+  private void createWarehouse(String code, String location, int capacity, int stock) {
+    given()
+        .contentType("application/json")
+        .body(Map.of("businessUnitCode", code, "location", location, "capacity", capacity, "stock", stock))
+        .when()
+        .post("/warehouse")
+        .then()
+        .statusCode(201);
+  }
+
+  private void archiveWarehouse(String code) {
+    QuarkusTransaction.requiringNew()
+        .run(() -> warehouseRepository.archiveActive(code, LocalDateTime.now()));
+  }
+
+  @Test
+  public void testCreateAssignmentHappyPathReturns201() {
+    try {
+      given()
+          .contentType("application/json")
+          .body(payload(1L, "MWH.001"))
+          .when()
+          .post(path(1L))
+          .then()
+          .statusCode(201)
+          .body("storeId", equalTo(1))
+          .body("productId", equalTo(1))
+          .body("warehouseBusinessUnitCode", equalTo("MWH.001"))
+          .body("warehouseActive", equalTo(true))
+          .body("id", notNullValue())
+          .body("createdAt", notNullValue());
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  @Test
+  public void testListForStoreReturnsStructuredJson() {
+    try {
+      given().contentType("application/json").body(payload(1L, "MWH.001")).when().post(path(1L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(1L, "MWH.012")).when().post(path(1L)).then().statusCode(201);
+
+      given()
+          .when()
+          .get(path(1L))
+          .then()
+          .statusCode(200)
+          .body("$", hasSize(2))
+          .body("warehouseBusinessUnitCode", org.hamcrest.Matchers.containsInAnyOrder("MWH.001", "MWH.012"));
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  @Test
+  public void testListFilteredByProductId() {
+    try {
+      given().contentType("application/json").body(payload(1L, "MWH.001")).when().post(path(1L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(2L, "MWH.001")).when().post(path(1L)).then().statusCode(201);
+
+      given()
+          .when()
+          .get(path(1L) + "?productId=1")
+          .then()
+          .statusCode(200)
+          .body("$", hasSize(1))
+          .body("[0].productId", equalTo(1));
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+      deleteAssignmentsFor(1L, 2L);
+    }
+  }
+
+  @Test
+  public void testDeleteReturns204() {
+    int id =
+        given()
+            .contentType("application/json")
+            .body(payload(1L, "MWH.001"))
+            .when()
+            .post(path(1L))
+            .then()
+            .statusCode(201)
+            .extract()
+            .path("id");
+
+    given().when().delete(path(1L) + "/" + id).then().statusCode(204);
+    given().when().get(path(1L)).then().statusCode(200).body("$", hasSize(0));
+  }
+
+  @Test
+  public void testDeleteUnknownAssignmentReturns404() {
+    given().when().delete(path(1L) + "/999999").then().statusCode(404).body("code", equalTo("NOT_FOUND"));
+  }
+
+  @Test
+  public void testCreateWithMalformedDataReturns400WithDetails() {
+    given()
+        .contentType("application/json")
+        .body(Map.of("warehouseBusinessUnitCode", ""))
+        .when()
+        .post(path(1L))
+        .then()
+        .statusCode(400)
+        .body("code", equalTo("VALIDATION"))
+        .body("details.productId", notNullValue())
+        .body("details.warehouseBusinessUnitCode", notNullValue());
+  }
+
+  @Test
+  public void testCreateForUnknownStoreReturns404() {
+    given()
+        .contentType("application/json")
+        .body(payload(1L, "MWH.001"))
+        .when()
+        .post(path(999_999L))
+        .then()
+        .statusCode(404)
+        .body("code", equalTo("NOT_FOUND"));
+  }
+
+  @Test
+  public void testCreateForUnknownProductReturns404() {
+    given()
+        .contentType("application/json")
+        .body(payload(999_999L, "MWH.001"))
+        .when()
+        .post(path(1L))
+        .then()
+        .statusCode(404)
+        .body("code", equalTo("NOT_FOUND"));
+  }
+
+  @Test
+  public void testCreateForUnknownWarehouseReturns404() {
+    given()
+        .contentType("application/json")
+        .body(payload(1L, "NOT-A-WAREHOUSE"))
+        .when()
+        .post(path(1L))
+        .then()
+        .statusCode(404)
+        .body("code", equalTo("NOT_FOUND"));
+  }
+
+  @Test
+  public void testListForUnknownStoreReturns404() {
+    given().when().get(path(999_999L)).then().statusCode(404).body("code", equalTo("NOT_FOUND"));
+  }
+
+  @Test
+  public void testDuplicateAssignmentReturns409() {
+    try {
+      given().contentType("application/json").body(payload(1L, "MWH.001")).when().post(path(1L)).then().statusCode(201);
+
+      given()
+          .contentType("application/json")
+          .body(payload(1L, "MWH.001"))
+          .when()
+          .post(path(1L))
+          .then()
+          .statusCode(409)
+          .body("code", equalTo("CONFLICT"));
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  @Test
+  public void testThirdDistinctWarehouseForSameProductReturns409() {
+    try {
+      given().contentType("application/json").body(payload(1L, "MWH.001")).when().post(path(1L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(1L, "MWH.012")).when().post(path(1L)).then().statusCode(201);
+
+      given()
+          .contentType("application/json")
+          .body(payload(1L, "MWH.023"))
+          .when()
+          .post(path(1L))
+          .then()
+          .statusCode(409)
+          .body("code", equalTo("CONFLICT"));
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  @Test
+  public void testFourthDistinctWarehouseForStoreReturns409() {
+    try {
+      given().contentType("application/json").body(payload(1L, "MWH.001")).when().post(path(2L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(2L, "MWH.012")).when().post(path(2L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(3L, "MWH.023")).when().post(path(2L)).then().statusCode(201);
+
+      try {
+        createWarehouse("FUL.STORE4TH", "VETSBY-001", 10, 1);
+
+        given()
+            .contentType("application/json")
+            .body(payload(1L, "FUL.STORE4TH"))
+            .when()
+            .post(path(2L))
+            .then()
+            .statusCode(409)
+            .body("code", equalTo("CONFLICT"));
+      } finally {
+        archiveWarehouse("FUL.STORE4TH");
+      }
+    } finally {
+      deleteAssignmentsFor(2L, 1L);
+      deleteAssignmentsFor(2L, 2L);
+      deleteAssignmentsFor(2L, 3L);
+    }
+  }
+
+  @Test
+  public void testSixthDistinctProductForWarehouseReturns409() {
+    createWarehouse("FUL.PRODUCT6TH", "EINDHOVEN-001", 10, 1);
+    // Seed data only has 3 products; create 3 more so there are 6 distinct ids to work with.
+    long extra1 = createProduct("FUL-EXTRA-1");
+    long extra2 = createProduct("FUL-EXTRA-2");
+    long extra3 = createProduct("FUL-EXTRA-3");
+    long[] allProducts = {1L, 2L, 3L, extra1, extra2, extra3};
+
+    try {
+      // All via store 1: only one warehouse is ever used for store 1 in this test, so rules 1
+      // and 2 stay well within their limits and only rule 3 (warehouse product-type limit) is
+      // exercised.
+      for (int i = 0; i < 5; i++) {
+        given()
+            .contentType("application/json")
+            .body(payload(allProducts[i], "FUL.PRODUCT6TH"))
+            .when()
+            .post(path(1L))
+            .then()
+            .statusCode(201);
+      }
+
+      given()
+          .contentType("application/json")
+          .body(payload(allProducts[5], "FUL.PRODUCT6TH"))
+          .when()
+          .post(path(1L))
+          .then()
+          .statusCode(409)
+          .body("code", equalTo("CONFLICT"));
+    } finally {
+      for (long productId : allProducts) {
+        deleteAssignmentsFor(1L, productId);
+      }
+      archiveWarehouse("FUL.PRODUCT6TH");
+      deleteProduct(extra1);
+      deleteProduct(extra2);
+      deleteProduct(extra3);
+    }
+  }
+
+  private long createProduct(String name) {
+    return given()
+        .contentType("application/json")
+        .body(Map.of("name", name))
+        .when()
+        .post("/product")
+        .then()
+        .statusCode(201)
+        .extract()
+        .jsonPath()
+        .getLong("id");
+  }
+
+  private void deleteProduct(long id) {
+    given().when().delete("/product/" + id).then().statusCode(204);
+  }
+
+  @Test
+  public void testWarehouseReplacementPreservesAssignmentResolution() {
+    try {
+      createWarehouse("FUL.REPL.1", "HELMOND-001", 10, 1);
+
+      int assignmentId =
+          given()
+              .contentType("application/json")
+              .body(payload(1L, "FUL.REPL.1"))
+              .when()
+              .post(path(1L))
+              .then()
+              .statusCode(201)
+              .extract()
+              .path("id");
+
+      given()
+          .contentType("application/json")
+          .body(Map.of("businessUnitCode", "FUL.REPL.1", "location", "HELMOND-001", "capacity", 15, "stock", 1))
+          .when()
+          .post("/warehouse/FUL.REPL.1/replacement")
+          .then()
+          .statusCode(200);
+
+      given()
+          .when()
+          .get(path(1L))
+          .then()
+          .statusCode(200)
+          .body("[0].id", equalTo(assignmentId))
+          .body("[0].warehouseBusinessUnitCode", equalTo("FUL.REPL.1"))
+          .body("[0].warehouseActive", equalTo(true));
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+      archiveWarehouse("FUL.REPL.1");
+    }
+  }
+
+  @Test
+  public void testArchivingWarehouseWithoutReplacementPreservesAssignmentButFlagsInactive() {
+    try {
+      createWarehouse("FUL.ARCH.1", "ZWOLLE-002", 10, 1);
+
+      given().contentType("application/json").body(payload(1L, "FUL.ARCH.1")).when().post(path(2L)).then().statusCode(201);
+
+      given().when().delete("/warehouse/FUL.ARCH.1").then().statusCode(204);
+
+      given()
+          .when()
+          .get(path(2L))
+          .then()
+          .statusCode(200)
+          .body("$", hasSize(1))
+          .body("[0].warehouseBusinessUnitCode", equalTo("FUL.ARCH.1"))
+          .body("[0].warehouseActive", equalTo(false));
+
+      // An archived-only warehouse cannot be newly assigned.
+      given()
+          .contentType("application/json")
+          .body(payload(2L, "FUL.ARCH.1"))
+          .when()
+          .post(path(2L))
+          .then()
+          .statusCode(404)
+          .body("code", equalTo("NOT_FOUND"));
+    } finally {
+      deleteAssignmentsFor(2L, 1L);
+    }
+  }
+
+  @Test
+  public void testConcurrentIdenticalAssignmentsResultInExactlyOnePersistedRow() throws Exception {
+    try {
+      ExecutorService executor = Executors.newFixedThreadPool(4);
+      CountDownLatch startLatch = new CountDownLatch(1);
+      AtomicInteger successCount = new AtomicInteger();
+      AtomicInteger conflictCount = new AtomicInteger();
+
+      Runnable attempt =
+          () -> {
+            try {
+              startLatch.await();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            int status =
+                given()
+                    .contentType("application/json")
+                    .body(payload(1L, "MWH.001"))
+                    .when()
+                    .post(path(1L))
+                    .then()
+                    .extract()
+                    .statusCode();
+            (status == 201 ? successCount : conflictCount).incrementAndGet();
+          };
+
+      var futures =
+          IntStream.range(0, 4).mapToObj(i -> executor.submit(attempt)).toList();
+      startLatch.countDown();
+      for (Future<?> f : futures) {
+        f.get(30, TimeUnit.SECONDS);
+      }
+      executor.shutdown();
+
+      assertEquals(1, successCount.get(), "exactly one of the identical concurrent requests must succeed");
+      assertEquals(3, conflictCount.get());
+      assertEquals(1, fulfilmentAssignmentRepository.listByStoreAndProduct(1L, 1L).size());
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  @Test
+  public void testConcurrentDistinctWarehousesNeverExceedTheProductLimit() throws Exception {
+    try {
+      ExecutorService executor = Executors.newFixedThreadPool(3);
+      CountDownLatch startLatch = new CountDownLatch(1);
+      AtomicInteger successCount = new AtomicInteger();
+      AtomicInteger conflictCount = new AtomicInteger();
+      String[] codes = {"MWH.001", "MWH.012", "MWH.023"};
+
+      var futures =
+          IntStream.range(0, 3)
+              .mapToObj(
+                  i ->
+                      executor.submit(
+                          () -> {
+                            try {
+                              startLatch.await();
+                            } catch (InterruptedException e) {
+                              Thread.currentThread().interrupt();
+                            }
+                            int status =
+                                given()
+                                    .contentType("application/json")
+                                    .body(payload(1L, codes[i]))
+                                    .when()
+                                    .post(path(1L))
+                                    .then()
+                                    .extract()
+                                    .statusCode();
+                            (status == 201 ? successCount : conflictCount).incrementAndGet();
+                          }))
+              .toList();
+      startLatch.countDown();
+      for (Future<?> f : futures) {
+        f.get(30, TimeUnit.SECONDS);
+      }
+      executor.shutdown();
+
+      assertEquals(2, successCount.get(), "the rule-1 limit of 2 distinct warehouses must never be exceeded");
+      assertEquals(1, conflictCount.get());
+      assertTrue(fulfilmentAssignmentRepository.distinctWarehousesForStoreAndProduct(1L, 1L).size() <= 2);
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+    }
+  }
+}

@@ -1,0 +1,229 @@
+# Documentation-only OpenAPI contract for the fulfilment-assignment bonus feature.
+#
+# Deliberately NOT wired into quarkus.openapi.generator.spec (see application.properties, which
+# still points only at warehouse-openapi.yaml). This endpoint is handwritten, matching Product and
+# Store's convention rather than Warehouse's generated one - see README.md ("Bonus: API style") for
+# why. This file exists purely so the contract is documented explicitly, per the assignment's
+# request, without touching the working single-spec code-generation setup.
+openapi: 3.0.0
+info:
+  title: Fulfilment Assignment API
+  description: >
+    Associates Warehouses as fulfilment units for Products supplied to Stores.
+    Business limits: a Product may be fulfilled by at most 2 distinct Warehouses per Store;
+    a Store may be fulfilled by at most 3 distinct Warehouses in total; a Warehouse may store
+    at most 5 distinct Product types.
+  version: 1.0.0
+
+paths:
+  /stores/{storeId}/fulfilment-assignments:
+    get:
+      summary: List fulfilment assignments for a Store
+      parameters:
+        - name: storeId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: productId
+          in: query
+          required: false
+          description: Optional filter to only the assignments for this Product.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Assignments for the Store (optionally filtered by Product)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FulfilmentAssignment'
+              example:
+                - id: 1
+                  storeId: 1
+                  productId: 1
+                  warehouseBusinessUnitCode: "MWH.001"
+                  warehouseActive: true
+                  createdAt: "2024-07-01T00:00:00"
+                - id: 2
+                  storeId: 1
+                  productId: 1
+                  warehouseBusinessUnitCode: "MWH.012"
+                  warehouseActive: true
+                  createdAt: "2024-07-02T00:00:00"
+        '404':
+          description: Store (or, when filtering, Product) not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    post:
+      summary: Assign a Warehouse as a fulfilment unit for a Product at a Store
+      parameters:
+        - name: storeId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FulfilmentAssignmentRequest'
+            example:
+              productId: 1
+              warehouseBusinessUnitCode: "MWH.001"
+      responses:
+        '201':
+          description: Assignment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FulfilmentAssignment'
+              example:
+                id: 1
+                storeId: 1
+                productId: 1
+                warehouseBusinessUnitCode: "MWH.001"
+                warehouseActive: true
+                createdAt: "2024-07-01T00:00:00"
+        '400':
+          description: Malformed storeId/productId/warehouseBusinessUnitCode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: "VALIDATION"
+                message: "Fulfilment assignment data is invalid"
+                details:
+                  productId: "must not be null and must be positive"
+        '404':
+          description: Store, Product, or active Warehouse not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: "NOT_FOUND"
+                message: "No active warehouse found for business unit code 'MWH.999'"
+        '409':
+          description: Duplicate assignment, or one of the three fulfilment limits would be exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: "CONFLICT"
+                message: "Product 1 at store 1 is already fulfilled by the maximum of 2 distinct warehouse(s)"
+
+  /stores/{storeId}/fulfilment-assignments/{assignmentId}:
+    delete:
+      summary: Remove a fulfilment assignment
+      description: Deletes only this association row. Never deletes the Store, Product, or Warehouse.
+      parameters:
+        - name: storeId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: assignmentId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '204':
+          description: Assignment deleted
+        '404':
+          description: No assignment with this id exists for this Store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+components:
+  schemas:
+    FulfilmentAssignmentRequest:
+      type: object
+      required:
+        - productId
+        - warehouseBusinessUnitCode
+      properties:
+        productId:
+          type: integer
+          format: int64
+          minimum: 1
+        warehouseBusinessUnitCode:
+          type: string
+          minLength: 1
+          example: "MWH.001"
+
+    FulfilmentAssignment:
+      type: object
+      required:
+        - id
+        - storeId
+        - productId
+        - warehouseBusinessUnitCode
+        - warehouseActive
+        - createdAt
+      properties:
+        id:
+          type: integer
+          format: int64
+          readOnly: true
+        storeId:
+          type: integer
+          format: int64
+        productId:
+          type: integer
+          format: int64
+        warehouseBusinessUnitCode:
+          type: string
+        warehouseActive:
+          type: boolean
+          readOnly: true
+          description: >
+            False when the warehouse has since been archived without a replacement reusing its
+            code. The assignment row itself is preserved for history either way - see README.md
+            ("Archive without replacement").
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # Mirrors com.fulfilment.application.monolith.warehouses.adapters.restapi.ApiError, the
+    # runtime type this endpoint's FulfilmentDomainExceptionMapper actually returns - duplicated
+    # here only because this is a standalone documentation file with no $ref into
+    # warehouse-openapi.yaml's components.
+    ApiError:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: "CONFLICT"
+        message:
+          type: string
+          example: "A fulfilment assignment already exists for store 1, product 1, warehouse 'MWH.001'"
+        details:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string

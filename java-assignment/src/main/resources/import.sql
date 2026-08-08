@@ -27,3 +27,18 @@ ALTER SEQUENCE warehouse_seq RESTART WITH 4;
 CREATE UNIQUE INDEX ux_warehouse_active_business_unit_code
     ON warehouse (businessUnitCode)
     WHERE archivedAt IS NULL;
+
+-- BONUS: fulfilment_assignment (Store + Product + Warehouse). The table itself, its indexes, and
+-- its (store_id, product_id, warehouse_business_unit_code) unique constraint are all generated
+-- from @Table on DbFulfilmentAssignment - only the two foreign keys are added here, since a bare
+-- Long column has no JPA association for @JoinColumn to attach to.
+--
+-- No FK to warehouse(businessUnitCode): PostgreSQL requires an FK's target column(s) to be backed
+-- by a full UNIQUE or PRIMARY KEY constraint, and businessUnitCode only has the *partial* unique
+-- index above (active rows only) - attempting a plain FK against it fails at DDL time with
+-- "there is no unique constraint matching given keys for referenced table". Active-warehouse
+-- existence is validated at the application layer instead, via the existing WarehouseStore port.
+ALTER TABLE fulfilment_assignment
+    ADD CONSTRAINT fk_fulfilment_assignment_store FOREIGN KEY (store_id) REFERENCES store (id);
+ALTER TABLE fulfilment_assignment
+    ADD CONSTRAINT fk_fulfilment_assignment_product FOREIGN KEY (product_id) REFERENCES product (id);

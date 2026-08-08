@@ -163,6 +163,129 @@ Ambiguities in the brief that needed a judgment call, and the resolution chosen:
 
 ---
 
+## Bonus: fulfilment assignments (Store + Product + Warehouse)
+
+Associates Warehouses as fulfilment units for Products at Stores, enforcing three limits: at most
+2 distinct Warehouses per Product per Store, at most 3 distinct Warehouses per Store (across all
+its Products), and at most 5 distinct Product types per Warehouse (across all Stores). New
+top-level package `com.fulfilment.application.monolith.fulfilment`, following the Warehouse
+module's ports-and-adapters style end to end (REST adapter → operation ports → use cases →
+persistence port → Panache adapter, `@Transactional` on use-case methods).
+
+**Identifiers.** The assignment's own public id is its database-generated row id - unlike
+Warehouse, there's no single natural business key for a three-way association, so a row id is the
+simplest stable reference for `DELETE .../fulfilment-assignments/{assignmentId}`. The warehouse
+side is referenced by `warehouseBusinessUnitCode` and resolved to the currently active warehouse
+via the **existing** `WarehouseStore.findActiveByBusinessUnitCode` port (reused directly, not
+duplicated) - the same port `CreateWarehouseUseCase`/`ReplaceWarehouseUseCase` already use. This is
+what makes warehouse replacement transparent to assignments for free: replacing a warehouse
+archives the old row and inserts a new one with the *same* business unit code, so an assignment
+that stored that code keeps resolving correctly with zero changes to any assignment row.
+
+**API** (handwritten, like Product/Store - not OpenAPI-generated like Warehouse; see QUESTIONS.md
+Q2 for the reasoning, applied here since this is an internal Store-scoped resource, not a
+cross-team contract):
+
+- `POST /stores/{storeId}/fulfilment-assignments` - body `{"productId": 1, "warehouseBusinessUnitCode": "MWH.001"}` → 201 with the created assignment.
+- `GET /stores/{storeId}/fulfilment-assignments` (optional `?productId=`) → 200 with an array.
+- `DELETE /stores/{storeId}/fulfilment-assignments/{assignmentId}` → 204.
+
+A standalone `src/main/resources/openapi/fulfilment-assignment-openapi.yaml` documents the
+contract (required fields, minimum id values, all response statuses, the `ApiError` schema,
+examples) but is **not** wired into `quarkus.openapi.generator.spec` - that config still names only
+`warehouse-openapi.yaml`. Wiring a second spec into the existing single-spec generator setup for an
+internal, handwritten-style endpoint wasn't worth the risk to the working codegen configuration.
+
+**Errors.** Reuses the existing `DomainErrorType` (VALIDATION/NOT_FOUND/CONFLICT) and `ApiError`
+response shape from the warehouse module directly - both are already generic, not
+warehouse-specific - via a new `FulfilmentDomainException` base and `FulfilmentDomainExceptionMapper`
+that mirror `WarehouseDomainException`/`WarehouseDomainExceptionMapper` exactly. Named exceptions:
+`StoreNotFoundException`, `ProductNotFoundException`, `WarehouseNotFoundException` (fulfilment's
+own, deliberately distinct from the warehouse module's exception of the same simple name, so this
+module's error handling depends only on the `WarehouseStore` port, not another module's exception
+type), `FulfilmentAssignmentNotFoundException`, `DuplicateFulfilmentAssignmentException`,
+`ProductWarehouseLimitExceededException`, `StoreWarehouseLimitExceededException`,
+`WarehouseProductTypeLimitExceededException`.
+
+**Distinct-count interpretation.** All three limits count *distinct* warehouse/product identifiers,
+never assignment rows: `distinctWarehousesForStore` is `SELECT DISTINCT warehouse_business_unit_code
+... WHERE store_id = ?`, so three rows for the same store spread across two warehouses count as 2,
+not 3 (matching the assignment's own worked example). The three "distinct" persistence methods
+return the actual set, not just a `COUNT` - each limit is small (2/3/5) so the set is always tiny
+once the invariant holds, and having the set (not just its size) answers both "is this
+warehouse/product already counted" (membership - needed so re-using an existing warehouse/product
+never wrongly trips the limit) and "how many are there" (size) from one query instead of two.
+
+**Duplicate handling.** An exact repeat of the same Store+Product+Warehouse triple returns **409**
+(`DuplicateFulfilmentAssignmentException`), not the existing row - chosen over silently returning
+the existing assignment because a 409 makes the caller's mistaken assumption ("this doesn't exist
+yet") visible, whereas a quiet 200 would hide it.
+
+**Concurrency.** Three transaction-scoped PostgreSQL advisory locks, acquired in a fixed order
+every time - **store, then store+product, then warehouse** - so concurrent requests touching
+overlapping dimensions can never deadlock against each other:
+
+```
+SELECT pg_advisory_xact_lock(9001, hashtext(storeId))            -- store
+SELECT pg_advisory_xact_lock(9002, hashtext(storeId:productId))  -- store+product
+SELECT pg_advisory_xact_lock(9003, hashtext(warehouseCode))      -- warehouse
+```
+
+The two-integer-key form `pg_advisory_xact_lock(class, key)` is a separate keyspace from the
+single-bigint form `WarehouseRepository`'s location lock already uses (`pg_advisory_xact_lock(hashtext(...))`),
+so the two features' locks can never collide with each other by construction - this is documented
+PostgreSQL behaviour, not a coincidence of the chosen constants. After acquiring all three locks,
+the use case re-reads all three distinct sets, re-checks the exact duplicate, validates all three
+limits, and inserts - all inside the one transaction the locks are scoped to. A unique constraint on
+`(store_id, product_id, warehouse_business_unit_code)` backstops the duplicate check at the database
+level too (mirroring the warehouse partial-index precedent), for defense in depth against anything
+that bypasses the use case. Deletion needs no locking: removing an assignment can only free
+capacity against a limit, never violate one.
+
+**Database.** `fulfilment_assignment(id, store_id, product_id, warehouse_business_unit_code,
+created_at)`, generated from `@Table` on `DbFulfilmentAssignment` with indexes on `store_id`,
+`(store_id, product_id)`, and `warehouse_business_unit_code`, plus the unique constraint above.
+Foreign keys to `store(id)` and `product(id)` are added via raw DDL in `import.sql` (a bare `Long`
+column has no JPA association for `@JoinColumn` to attach to). **No FK to
+`warehouse(businessUnitCode)`**: PostgreSQL requires an FK's target column to be backed by a full
+UNIQUE or PRIMARY KEY constraint, and `businessUnitCode` only has the *partial* unique index from
+the mandatory Warehouse work (active rows only) - a plain FK against it fails at DDL time with
+"there is no unique constraint matching given keys". Active-warehouse existence is validated at the
+application layer via `WarehouseStore` instead, exactly as the identifier decision above intends.
+As with the rest of this project's schema, `import.sql` is a stand-in for a real migration tool;
+production should use Flyway or Liquibase, versioned and applied incrementally, rather than a
+drop-and-recreate script.
+
+**Warehouse replacement and archive interaction.**
+- *Replacement* needs no fulfilment-side changes at all - proven by
+  `FulfilmentAssignmentResourceTest#testWarehouseReplacementPreservesAssignmentResolution`, which
+  creates an assignment, replaces the warehouse via the existing, unmodified
+  `POST /warehouse/{code}/replacement` endpoint, and confirms the assignment still resolves.
+- *Archive without replacement*: assignment rows are **never rewritten, hidden, or deleted** because
+  their warehouse was archived - archiving is never rejected due to existing assignments either.
+  Both directions of that choice were effectively forced by scope control (this bonus must not
+  change existing mandatory Warehouse behaviour, so `ArchiveWarehouseUseCase` couldn't be taught a
+  new rejection rule). Instead, `ListStoreFulfilmentAssignmentsUseCase` stamps every returned
+  assignment with a computed `warehouseActive` flag (bounded to at most 3 extra reads per store,
+  per rule 2, and cached per distinct code within one call) - the "indicate" option the brief
+  explicitly allows as an alternative to excluding rows, chosen because silently hiding a store's
+  fulfilment history seemed like the worse outcome. An archived-only `warehouseBusinessUnitCode`
+  cannot be used in a **new** assignment (`WarehouseNotFoundException`, 404) - only existing rows
+  are preserved.
+
+**Deletion is physical, not soft.** An assignment has no replacement/versioning concept the way a
+Warehouse does, so unlike archiving a Warehouse, there's no historical value in keeping a deleted
+assignment row around.
+
+**Deliberate simplifications:** no seed data was added for `fulfilment_assignment` (avoids
+depending on Hibernate's exact generated sequence name, which the existing Warehouse/Store/Product
+fixtures rely on for their own `ALTER SEQUENCE ... RESTART` calls - not worth the coupling for a
+bonus feature); `CatalogGateway`'s existence checks call `Store`/`ProductRepository` directly from
+a thin adapter rather than introducing richer Store/Product ports, since existence-checking is all
+this bonus needs from those modules.
+
+---
+
 ## Test suite overview
 
 - `LocationGatewayTest` - existing/unknown/blank/null identifier resolution (Task 1).
@@ -179,6 +302,18 @@ Ambiguities in the brief that needed a judgment call, and the resolution chosen:
 - `WarehouseEndpointIT` - `@QuarkusIntegrationTest` smoke test against the packaged jar, run by
   `./mvnw verify` (Failsafe was previously only wired in the `native` profile, so `*IT.java` never
   actually ran under `test` or a plain `verify` - fixed as part of this change).
+- `AssignWarehouseToProductForStoreUseCaseTest` / `RemoveFulfilmentAssignmentUseCaseTest` /
+  `ListStoreFulfilmentAssignmentsUseCaseTest` (bonus) - fast Mockito unit tests: existence checks,
+  duplicate detection, all three limits including the "reusing an already-counted warehouse/product
+  doesn't trip the limit" branch, and the `warehouseActive` flag/caching.
+- `FulfilmentAssignmentRepositoryTest` (bonus) - `@QuarkusTest` + real Postgres: distinct-set
+  queries collapse duplicate rows correctly, the unique constraint and both foreign keys reject
+  violations at the database level.
+- `FulfilmentAssignmentResourceTest` (bonus) - `@QuarkusTest` + RestAssured: happy paths,
+  representative 400/404/409s, the warehouse-replacement and archive-without-replacement
+  interactions, and two concurrency tests - identical concurrent requests yield exactly one
+  persisted row, and racing distinct warehouses against the rule-1 limit never exceeds it
+  regardless of which request wins.
 
 Run the fast suite with `./mvnw test`; run everything, including the packaged-jar smoke test, with
 `./mvnw verify`. Both require Docker (for Quarkus Dev Services' PostgreSQL container) unless a
