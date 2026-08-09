@@ -117,7 +117,12 @@ paths:
                 code: "NOT_FOUND"
                 message: "No active warehouse found for business unit code 'MWH.999'"
         '409':
-          description: Duplicate assignment, or one of the three fulfilment limits would be exceeded
+          description: >
+            Duplicate assignment (the exact Store+Product+Warehouse triple already exists, in any
+            lifecycle state), or one of the three fulfilment limits would be exceeded. The three
+            limits only count assignments whose Warehouse is *currently active*: a preserved
+            historical assignment referencing an archived-without-replacement Warehouse does not
+            occupy a limit slot, so archiving a Warehouse can free capacity for a new assignment.
           content:
             application/json:
               schema:
@@ -206,10 +211,9 @@ components:
           format: date-time
           readOnly: true
 
-    # Mirrors com.fulfilment.application.monolith.warehouses.adapters.restapi.ApiError, the
-    # runtime type this endpoint's FulfilmentDomainExceptionMapper actually returns - duplicated
-    # here only because this is a standalone documentation file with no $ref into
-    # warehouse-openapi.yaml's components.
+    # Mirrors com.fulfilment.application.monolith.common.ApiError, the runtime type this endpoint's
+    # FulfilmentDomainExceptionMapper actually returns - duplicated here only because this is a
+    # standalone documentation file with no $ref into warehouse-openapi.yaml's components.
     ApiError:
       type: object
       required:

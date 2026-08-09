@@ -1,6 +1,6 @@
 package com.fulfilment.application.monolith.fulfilment.domain.exceptions;
 
-import com.fulfilment.application.monolith.warehouses.domain.exceptions.DomainErrorType;
+import com.fulfilment.application.monolith.common.DomainErrorType;
 
 /** Rule 3: a warehouse may store at most N distinct product types, across all stores. */
 public class WarehouseProductTypeLimitExceededException extends FulfilmentDomainException {

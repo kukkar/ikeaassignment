@@ -1,5 +1,6 @@
 package com.fulfilment.application.monolith.warehouses.domain.exceptions;
 
+import com.fulfilment.application.monolith.common.DomainErrorType;
 import java.util.Collections;
 import java.util.Map;
 

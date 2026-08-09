@@ -1,5 +1,7 @@
 package com.fulfilment.application.monolith.warehouses.domain.exceptions;
 
+import com.fulfilment.application.monolith.common.DomainErrorType;
+
 /**
  * Raised when the aggregate active capacity of a location (existing active warehouses plus the
  * requested one) would exceed {@code Location.maxCapacity}.

@@ -14,6 +14,7 @@ import jakarta.transaction.Transactional;
 import java.time.Clock;
 import java.time.LocalDateTime;
 
+/** Reusing an archived-only code reactivates it - see {@link WarehouseStore#lockForActivation}. */
 @ApplicationScoped
 public class CreateWarehouseUseCase implements CreateWarehouseOperation {
 
@@ -32,6 +33,8 @@ public class CreateWarehouseUseCase implements CreateWarehouseOperation {
   @Transactional
   public void create(Warehouse warehouse) {
     WarehouseValidator.validateBasicFields(warehouse);
+
+    warehouseStore.lockForActivation(warehouse.businessUnitCode);
 
     if (warehouseStore.findActiveByBusinessUnitCode(warehouse.businessUnitCode) != null) {
       throw new DuplicateBusinessUnitCodeException(warehouse.businessUnitCode);

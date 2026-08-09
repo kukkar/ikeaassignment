@@ -60,6 +60,15 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
     when(fulfilmentAssignmentStore.distinctProductsForWarehouse(WAREHOUSE_CODE)).thenReturn(Set.of());
   }
 
+  /** By default, an unstubbed {@code findActiveByBusinessUnitCode} returns null (Mockito's
+   * default), i.e. "archived" - so every warehouse code a test wants counted as operationally
+   * active toward rules 1/2 must be stubbed active explicitly via this helper. */
+  private void stubActive(String... warehouseBusinessUnitCodes) {
+    for (String code : warehouseBusinessUnitCodes) {
+      when(warehouseStore.findActiveByBusinessUnitCode(code)).thenReturn(new Warehouse());
+    }
+  }
+
   @Test
   void testValidAssignmentPersistsAndStampsCreatedAt() {
     FulfilmentAssignment created = useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
@@ -123,18 +132,48 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
     useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
 
     verify(warehouseStore).lockActiveByBusinessUnitCode(WAREHOUSE_CODE);
-    verify(warehouseStore, never()).findActiveByBusinessUnitCode(any());
+  }
+
+  @Test
+  void testActiveOnlyFilteringTakesTheActivationLockBeforeReadingEachHistoricalCode() {
+    // Regression test for the warehouse reactivation race: a plain read of "is MWH.A active" holds
+    // no lock, so nothing would stop a concurrent CreateWarehouseUseCase from reactivating MWH.A
+    // (inserting a brand new active row for a code that currently has none) between this read and
+    // this transaction's commit - which would let the limit be exceeded once both commit. See
+    // WarehouseStore#lockForActivation and the use case's class Javadoc.
+    stubActive("MWH.B");
+    when(fulfilmentAssignmentStore.distinctWarehousesForStore(STORE_ID))
+        .thenReturn(Set.of("MWH.A", "MWH.B")); // MWH.A left unstubbed -> archived
+
+    useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
+
+    verify(warehouseStore).lockForActivation("MWH.A");
+    verify(warehouseStore).lockForActivation("MWH.B");
   }
 
   @Test
   void testExactDuplicateAssignmentIsRejected() {
-    when(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(STORE_ID, PRODUCT_ID))
-        .thenReturn(Set.of(WAREHOUSE_CODE));
+    when(fulfilmentAssignmentStore.existsExact(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE)).thenReturn(true);
 
     assertThrows(
         DuplicateFulfilmentAssignmentException.class,
         () -> useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE));
     verify(fulfilmentAssignmentStore, never()).create(any());
+  }
+
+  @Test
+  void testDuplicateDetectionIgnoresWarehouseActiveStatus() {
+    // existsExact must catch a repeat of the exact triple regardless of the referenced warehouse's
+    // current status - the unique constraint doesn't care either, so this check must match it, or
+    // a duplicate against a historical (now-archived-code) row would hit a raw constraint
+    // violation instead of a clean 409. Simulated here simply by existsExact returning true
+    // without any corresponding "active" stub - proving the duplicate check never even consults
+    // warehouse activeness.
+    when(fulfilmentAssignmentStore.existsExact(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE)).thenReturn(true);
+
+    assertThrows(
+        DuplicateFulfilmentAssignmentException.class,
+        () -> useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE));
   }
 
   @Test
@@ -152,10 +191,11 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
         FulfilmentValidationException.class, () -> useCase.assign(-1L, PRODUCT_ID, WAREHOUSE_CODE));
   }
 
-  // --- Rule 1: max 2 distinct warehouses per product per store ---
+  // --- Rule 1: max 2 distinct *active* warehouses per product per store ---
 
   @Test
   void testSecondDistinctWarehouseForSameProductIsAllowed() {
+    stubActive("MWH.OTHER");
     when(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(STORE_ID, PRODUCT_ID))
         .thenReturn(Set.of("MWH.OTHER"));
 
@@ -165,7 +205,8 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
   }
 
   @Test
-  void testThirdDistinctWarehouseForSameProductIsRejected() {
+  void testThirdDistinctActiveWarehouseForSameProductIsRejected() {
+    stubActive("MWH.A", "MWH.B");
     when(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(STORE_ID, PRODUCT_ID))
         .thenReturn(Set.of("MWH.A", "MWH.B"));
 
@@ -175,10 +216,26 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
     verify(fulfilmentAssignmentStore, never()).create(any());
   }
 
-  // --- Rule 2: max 3 distinct warehouses per store, across all products ---
+  @Test
+  void testArchivedWarehouseInTheSetDoesNotCountTowardTheProductLimit() {
+    // Problem 3 fix: MWH.A is referenced by a preserved historical assignment row but its
+    // warehouse is now archived-only (findActiveByBusinessUnitCode returns null, the default for
+    // an unstubbed code here) - it must not occupy one of product 100's 2 warehouse slots at
+    // store 1, so a second genuinely active warehouse must still be accepted.
+    stubActive("MWH.B");
+    when(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(STORE_ID, PRODUCT_ID))
+        .thenReturn(Set.of("MWH.A", "MWH.B")); // MWH.A left unstubbed -> archived
+
+    FulfilmentAssignment created = useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
+
+    verify(fulfilmentAssignmentStore).create(created);
+  }
+
+  // --- Rule 2: max 3 distinct *active* warehouses per store, across all products ---
 
   @Test
-  void testFourthDistinctWarehouseForStoreIsRejected() {
+  void testFourthDistinctActiveWarehouseForStoreIsRejected() {
+    stubActive("MWH.A", "MWH.B", "MWH.C");
     when(fulfilmentAssignmentStore.distinctWarehousesForStore(STORE_ID))
         .thenReturn(Set.of("MWH.A", "MWH.B", "MWH.C"));
 
@@ -190,8 +247,9 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
 
   @Test
   void testAssigningAnotherProductToAnExistingStoreWarehouseIsAllowedEvenAtTheLimit() {
-    // The store already has 3 distinct warehouses, including WAREHOUSE_CODE itself - assigning a
-    // *different* product to that same warehouse must not be blocked by rule 2.
+    // The store already has 3 distinct *active* warehouses, including WAREHOUSE_CODE itself -
+    // assigning a *different* product to that same warehouse must not be blocked by rule 2.
+    stubActive("MWH.B", "MWH.C");
     when(fulfilmentAssignmentStore.distinctWarehousesForStore(STORE_ID))
         .thenReturn(Set.of(WAREHOUSE_CODE, "MWH.B", "MWH.C"));
 
@@ -200,7 +258,23 @@ public class AssignWarehouseToProductForStoreUseCaseTest {
     verify(fulfilmentAssignmentStore).create(created);
   }
 
-  // --- Rule 3: max 5 distinct product types per warehouse, across all stores ---
+  @Test
+  void testArchivedWarehouseInTheSetDoesNotCountTowardTheStoreLimit() {
+    // Problem 3 fix: the store has 3 rows referencing distinct codes, but one (MWH.C) is now
+    // archived-only - only 2 are operationally active, so a genuinely new 3rd active warehouse
+    // (WAREHOUSE_CODE) must be accepted, not rejected as if the store were already at its limit.
+    stubActive("MWH.A", "MWH.B");
+    when(fulfilmentAssignmentStore.distinctWarehousesForStore(STORE_ID))
+        .thenReturn(Set.of("MWH.A", "MWH.B", "MWH.C")); // MWH.C left unstubbed -> archived
+
+    FulfilmentAssignment created = useCase.assign(STORE_ID, PRODUCT_ID, WAREHOUSE_CODE);
+
+    verify(fulfilmentAssignmentStore).create(created);
+  }
+
+  // --- Rule 3: max 5 distinct product types per warehouse, across all stores - scoped by
+  // business-unit-code identity, deliberately NOT filtered by current warehouse active status
+  // (see the use case's class Javadoc) ---
 
   @Test
   void testSixthDistinctProductForWarehouseIsRejected() {

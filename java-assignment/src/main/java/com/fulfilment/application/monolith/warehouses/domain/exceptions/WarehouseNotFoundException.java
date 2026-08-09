@@ -1,5 +1,7 @@
 package com.fulfilment.application.monolith.warehouses.domain.exceptions;
 
+import com.fulfilment.application.monolith.common.DomainErrorType;
+
 /** Raised when no active warehouse exists for the given business unit code. */
 public class WarehouseNotFoundException extends WarehouseDomainException {
 

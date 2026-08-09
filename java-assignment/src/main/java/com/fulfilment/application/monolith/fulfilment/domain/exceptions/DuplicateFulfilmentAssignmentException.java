@@ -1,6 +1,6 @@
 package com.fulfilment.application.monolith.fulfilment.domain.exceptions;
 
-import com.fulfilment.application.monolith.warehouses.domain.exceptions.DomainErrorType;
+import com.fulfilment.application.monolith.common.DomainErrorType;
 
 /** Raised when the exact same Store + Product + Warehouse assignment already exists. */
 public class DuplicateFulfilmentAssignmentException extends FulfilmentDomainException {

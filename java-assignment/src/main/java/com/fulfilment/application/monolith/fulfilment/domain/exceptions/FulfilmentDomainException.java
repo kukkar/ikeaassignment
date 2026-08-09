@@ -1,13 +1,13 @@
 package com.fulfilment.application.monolith.fulfilment.domain.exceptions;
 
-import com.fulfilment.application.monolith.warehouses.domain.exceptions.DomainErrorType;
+import com.fulfilment.application.monolith.common.DomainErrorType;
 
 /**
- * Base type for every business-rule failure raised by the fulfilment-assignment domain. Reuses
- * {@link DomainErrorType} from the warehouse domain rather than cloning it: the enum
- * (VALIDATION/NOT_FOUND/CONFLICT) is generic, not warehouse-specific, and {@link
- * com.fulfilment.application.monolith.warehouses.adapters.restapi.ApiError} - the response body
- * shape this maps to - is reused the same way, keeping one stable error contract across the API.
+ * Base type for every business-rule failure raised by the fulfilment-assignment domain. Uses the
+ * shared {@link DomainErrorType} (owned by {@code common}, not by any single module) rather than
+ * cloning it, and maps to the shared {@code common.ApiError} response body the same way - so the
+ * fulfilment domain depends on generic, module-neutral infrastructure, not on the Warehouse
+ * module's own packages, for a concept that was never warehouse-specific to begin with.
  */
 public abstract class FulfilmentDomainException extends RuntimeException {
 

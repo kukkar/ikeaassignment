@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fulfilment.application.monolith.fulfilment.adapters.database.FulfilmentAssignmentRepository;
 import com.fulfilment.application.monolith.fulfilment.domain.models.FulfilmentAssignment;
 import com.fulfilment.application.monolith.warehouses.adapters.database.WarehouseRepository;
+import com.fulfilment.application.monolith.warehouses.domain.models.Warehouse;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -311,6 +312,66 @@ public class FulfilmentAssignmentResourceTest {
     }
   }
 
+  /**
+   * Problem 3 end-to-end proof: a store's 3 active-warehouse slots are genuinely freed once one
+   * of them is archived without replacement, using real warehouses, real archiving, and real HTTP
+   * calls against Postgres - not mocks.
+   */
+  @Test
+  public void testArchivingAWarehouseFreesItsStoreSlotForAGenuinelyNewWarehouse() {
+    createWarehouse("FUL.LIM.A", "HELMOND-001", 10, 1);
+    createWarehouse("FUL.LIM.B", "EINDHOVEN-001", 10, 1);
+    createWarehouse("FUL.LIM.C", "ZWOLLE-002", 10, 1);
+    try {
+      given().contentType("application/json").body(payload(1L, "FUL.LIM.A")).when().post(path(3L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(2L, "FUL.LIM.B")).when().post(path(3L)).then().statusCode(201);
+      given().contentType("application/json").body(payload(3L, "FUL.LIM.C")).when().post(path(3L)).then().statusCode(201);
+
+      createWarehouse("FUL.LIM.D", "AMSTERDAM-002", 10, 1);
+      try {
+        // At the limit: a 4th distinct active warehouse is rejected.
+        given()
+            .contentType("application/json")
+            .body(payload(1L, "FUL.LIM.D"))
+            .when()
+            .post(path(3L))
+            .then()
+            .statusCode(409)
+            .body("code", equalTo("CONFLICT"));
+
+        // Archive one of the 3 - it stops operationally fulfilling the store...
+        given().when().delete("/warehouse/FUL.LIM.C").then().statusCode(204);
+
+        // ...the historical row is still listed, now flagged inactive...
+        given()
+            .when()
+            .get(path(3L) + "?productId=3")
+            .then()
+            .statusCode(200)
+            .body("[0].warehouseBusinessUnitCode", equalTo("FUL.LIM.C"))
+            .body("[0].warehouseActive", equalTo(false));
+
+        // ...and the store now has a genuine free slot for a new, distinct active warehouse.
+        given()
+            .contentType("application/json")
+            .body(payload(1L, "FUL.LIM.D"))
+            .when()
+            .post(path(3L))
+            .then()
+            .statusCode(201);
+      } finally {
+        archiveWarehouse("FUL.LIM.D");
+      }
+    } finally {
+      deleteAssignmentsFor(3L, 1L);
+      deleteAssignmentsFor(3L, 2L);
+      deleteAssignmentsFor(3L, 3L);
+      archiveWarehouse("FUL.LIM.A");
+      archiveWarehouse("FUL.LIM.B");
+      archiveWarehouse("FUL.LIM.C"); // no-op if already archived above
+    }
+  }
+
   private long createProduct(String name) {
     return given()
         .contentType("application/json")
@@ -544,6 +605,104 @@ public class FulfilmentAssignmentResourceTest {
       assertEquals(assignStatus == 201 ? 1 : 0, assignments.size());
     } finally {
       deleteAssignmentsFor(1L, 1L);
+    }
+  }
+
+  /**
+   * Deterministic proof for the warehouse-reactivation race, distinct from {@link
+   * #testConcurrentArchiveAndAssignAlwaysProducesAValidOutcome} (archive/replace only): a real,
+   * explicitly-paused reactivation of a store's own historical code must block a real concurrent
+   * {@code assign()} call already evaluating that code, and once unblocked, must be correctly
+   * counted - see README.md ("Concurrency: warehouse reactivation race").
+   */
+  @Test
+  public void testReactivatingAnArchivedWarehouseCodeBlocksAConcurrentStoreLimitEvaluation() throws Exception {
+    String reactivatedCode = "FUL.REACT.A";
+    String otherActiveB = "FUL.REACT.B";
+    String otherActiveC = "FUL.REACT.C";
+    String targetD = "FUL.REACT.D";
+    // One product per warehouse below, so only rule 2 (not rule 1) is exercised.
+    long scratchProductId = createProduct("FUL-REACT-PRODUCT");
+    try {
+      createWarehouse(reactivatedCode, "AMSTERDAM-002", 10, 1);
+      given().contentType("application/json").body(payload(1L, reactivatedCode)).when().post(path(1L)).then().statusCode(201);
+      given().when().delete("/warehouse/" + reactivatedCode).then().statusCode(204);
+
+      createWarehouse(otherActiveB, "EINDHOVEN-001", 10, 1);
+      given().contentType("application/json").body(payload(2L, otherActiveB)).when().post(path(1L)).then().statusCode(201);
+
+      createWarehouse(otherActiveC, "ZWOLLE-002", 10, 1);
+      given().contentType("application/json").body(payload(3L, otherActiveC)).when().post(path(1L)).then().statusCode(201);
+
+      createWarehouse(targetD, "HELMOND-001", 10, 1);
+
+      ExecutorService executor = Executors.newFixedThreadPool(2);
+      CountDownLatch lockAcquired = new CountDownLatch(1);
+      CountDownLatch releaseLock = new CountDownLatch(1);
+      AtomicInteger assignStatus = new AtomicInteger();
+
+      Future<?> reactivator =
+          executor.submit(
+              () ->
+                  QuarkusTransaction.requiringNew()
+                      .run(
+                          () -> {
+                            warehouseRepository.lockForActivation(reactivatedCode);
+                            lockAcquired.countDown();
+                            try {
+                              releaseLock.await(10, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                              Thread.currentThread().interrupt();
+                            }
+                            Warehouse reactivated = new Warehouse();
+                            reactivated.businessUnitCode = reactivatedCode;
+                            reactivated.location = "AMSTERDAM-002";
+                            reactivated.capacity = 10;
+                            reactivated.stock = 1;
+                            reactivated.createdAt = LocalDateTime.now();
+                            reactivated.archivedAt = null;
+                            warehouseRepository.create(reactivated);
+                          }));
+
+      assertTrue(lockAcquired.await(5, TimeUnit.SECONDS), "reactivator must acquire the activation lock");
+
+      Future<?> assigner =
+          executor.submit(
+              () ->
+                  assignStatus.set(
+                      given()
+                          .contentType("application/json")
+                          .body(payload(scratchProductId, targetD))
+                          .when()
+                          .post(path(1L))
+                          .then()
+                          .extract()
+                          .statusCode()));
+
+      // Give assign() a real chance to run (and wrongly finish) if it is not blocked.
+      Thread.sleep(500);
+      assertEquals(0, assignStatus.get(), "assign() must still be blocked while the reactivation lock is held");
+
+      releaseLock.countDown();
+      reactivator.get(5, TimeUnit.SECONDS);
+      assigner.get(5, TimeUnit.SECONDS);
+      executor.shutdown();
+
+      assertEquals(
+          409,
+          assignStatus.get(),
+          "once the reactivation is visible, the store's 3-warehouse limit (reactivatedCode, B, C) "
+              + "must correctly reject a 4th - not silently exceed it");
+    } finally {
+      deleteAssignmentsFor(1L, 1L);
+      deleteAssignmentsFor(1L, 2L);
+      deleteAssignmentsFor(1L, 3L);
+      deleteAssignmentsFor(1L, scratchProductId);
+      deleteProduct(scratchProductId);
+      archiveWarehouse(reactivatedCode);
+      archiveWarehouse(otherActiveB);
+      archiveWarehouse(otherActiveC);
+      archiveWarehouse(targetD);
     }
   }
 }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.persistence.PersistenceException;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 import java.util.List;
+import org.hibernate.exception.ConstraintViolationException;
 import org.jboss.logging.Logger;
 
 @Path("product")
@@ -80,6 +82,7 @@ public class ProductResource {
     return entity;
   }
 
+  // See the identical comment on StoreResource.delete: same FK shape, same reasoning.
   @DELETE
   @Path("{id}")
   @Transactional
@@ -88,8 +91,31 @@ public class ProductResource {
     if (entity == null) {
       throw new WebApplicationException("Product with id of " + id + " does not exist.", 404);
     }
-    productRepository.delete(entity);
+    try {
+      productRepository.delete(entity);
+      productRepository.flush();
+    } catch (PersistenceException e) {
+      if (!isForeignKeyViolation(e)) {
+        throw e;
+      }
+      throw new WebApplicationException(
+          "Product with id of "
+              + id
+              + " cannot be deleted because other records (e.g. fulfilment assignments) still reference it.",
+          409);
+    }
     return Response.status(204).build();
+  }
+
+  // PostgreSQL SQLState 23503 = foreign_key_violation. Checked explicitly, not just "is a
+  // PersistenceException", so an unrelated persistence failure is never mislabeled as a 409.
+  private static boolean isForeignKeyViolation(PersistenceException e) {
+    for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+      if (cause instanceof ConstraintViolationException cve) {
+        return "23503".equals(cve.getSQLState());
+      }
+    }
+    return false;
   }
 
   @Provider

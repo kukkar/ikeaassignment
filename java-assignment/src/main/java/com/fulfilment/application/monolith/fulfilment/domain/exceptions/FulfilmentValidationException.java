@@ -1,6 +1,6 @@
 package com.fulfilment.application.monolith.fulfilment.domain.exceptions;
 
-import com.fulfilment.application.monolith.warehouses.domain.exceptions.DomainErrorType;
+import com.fulfilment.application.monolith.common.DomainErrorType;
 import java.util.Map;
 
 /** Raised when the request data itself is malformed: null/non-positive ids, blank code, etc. */

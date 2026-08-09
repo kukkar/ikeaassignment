@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -24,6 +25,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 public class CreateWarehouseUseCaseTest {
 
@@ -62,6 +64,27 @@ public class CreateWarehouseUseCaseTest {
     verify(warehouseStore).create(warehouse);
     assertEquals(FIXED_CLOCK.instant().atZone(ZoneOffset.UTC).toLocalDateTime(), warehouse.createdAt);
     assertNull(warehouse.archivedAt);
+  }
+
+  /**
+   * Reusing an archived-only code reactivates it, which can race fulfilment's active-only limit
+   * counting for that same code (see AssignWarehouseToProductForStoreUseCase's Javadoc,
+   * "Concurrency: warehouse reactivation race") - closed by taking this lock before the duplicate
+   * check and insert, not after.
+   */
+  @Test
+  void testActivationLockIsTakenBeforeTheDuplicateCheckAndInsert() {
+    Warehouse warehouse = validWarehouse();
+    when(warehouseStore.findActiveByBusinessUnitCode("MWH.100")).thenReturn(null);
+    when(locationResolver.resolveByIdentifier("ZWOLLE-001")).thenReturn(new Location("ZWOLLE-001", 2, 40));
+    when(warehouseStore.lockActiveUsageByLocation("ZWOLLE-001")).thenReturn(new LocationUsage(0, 0));
+
+    useCase.create(warehouse);
+
+    InOrder order = inOrder(warehouseStore);
+    order.verify(warehouseStore).lockForActivation("MWH.100");
+    order.verify(warehouseStore).findActiveByBusinessUnitCode("MWH.100");
+    order.verify(warehouseStore).create(warehouse);
   }
 
   @Test

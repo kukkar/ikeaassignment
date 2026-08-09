@@ -33,6 +33,14 @@ public interface WarehouseStore {
    */
   LocationUsage lockActiveUsageByLocation(String locationIdentifier);
 
+  /**
+   * Acquires a transaction-scoped advisory lock keyed by this business unit code - unlike {@link
+   * #lockActiveByBusinessUnitCode}, this needs no row to exist, so it also serializes against a
+   * code being newly activated (an {@code INSERT}, which a row lock can't block). See README.md
+   * ("Concurrency: warehouse reactivation race").
+   */
+  void lockForActivation(String businessUnitCode);
+
   /** Inserts a brand new warehouse row. */
   void create(Warehouse warehouse);
 

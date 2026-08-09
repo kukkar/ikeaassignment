@@ -65,6 +65,17 @@ public class FulfilmentAssignmentRepositoryTest {
 
   @Test
   @TestTransaction
+  void testExistsExactMatchesOnlyTheExactTriple() {
+    repository.create(newAssignment(1L, 1L, "MWH.001"));
+
+    assertTrue(repository.existsExact(1L, 1L, "MWH.001"));
+    assertFalse(repository.existsExact(1L, 2L, "MWH.001"), "different product");
+    assertFalse(repository.existsExact(2L, 1L, "MWH.001"), "different store");
+    assertFalse(repository.existsExact(1L, 1L, "MWH.012"), "different warehouse");
+  }
+
+  @Test
+  @TestTransaction
   void testDistinctWarehousesForStoreAndProductCollapsesDuplicateWarehouseUsage() {
     repository.create(newAssignment(1L, 1L, "MWH.001"));
     repository.create(newAssignment(1L, 1L, "MWH.012"));

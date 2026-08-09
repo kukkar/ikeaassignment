@@ -1,5 +1,6 @@
 package com.fulfilment.application.monolith.warehouses.adapters.restapi;
 
+import com.fulfilment.application.monolith.common.ApiError;
 import com.fulfilment.application.monolith.warehouses.domain.exceptions.WarehouseDomainException;
 import com.fulfilment.application.monolith.warehouses.domain.exceptions.WarehouseValidationException;
 import jakarta.ws.rs.core.MediaType;

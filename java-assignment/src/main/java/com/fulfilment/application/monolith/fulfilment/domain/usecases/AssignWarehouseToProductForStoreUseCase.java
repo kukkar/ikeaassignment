@@ -16,30 +16,25 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.transaction.Transactional;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.HashSet;
 import java.util.Set;
 
 /**
  * Creates a fulfilment assignment, enforcing existence, duplication, and the three business
  * limits under a fixed lock order (store, then store+product, then warehouse - see {@link
- * FulfilmentAssignmentStore#acquireAssignmentLocks}) so concurrent requests can never together
- * exceed a limit, and never deadlock against each other.
+ * FulfilmentAssignmentStore#acquireAssignmentLocks}). Resolves {@code warehouseBusinessUnitCode}
+ * via the shared {@link WarehouseStore} port, so warehouse replacement (same code, new active row)
+ * is transparent here.
  *
- * <p>Reuses the existing {@link WarehouseStore} port to resolve {@code warehouseBusinessUnitCode}
- * to the currently active warehouse - the same port {@code CreateWarehouseUseCase} and {@code
- * ReplaceWarehouseUseCase} use - so a warehouse replacement (same code, new active row) is
- * transparent here: nothing needs to change for existing assignments to keep resolving correctly.
- *
- * <p>The active-warehouse check uses {@link WarehouseStore#lockActiveByBusinessUnitCode}, not the
- * plain read - the same row lock {@code ReplaceWarehouseUseCase} already takes on itself. Without
- * it, the check-then-insert here would race a concurrent archive/replace of the same warehouse: a
- * plain read holds no lock, so nothing would stop that other transaction from archiving the
- * warehouse and committing between this check and the insert below, leaving a brand new assignment
- * pointing at an archived-only warehouse. Taking the row lock here means a concurrent archive
- * blocks until this transaction commits (fine - the assignment was created against a genuinely
- * active warehouse, archiving it a moment later is the normal "archive without replacement"
- * behaviour), and a concurrent archive/replace that gets there first causes this call to correctly
- * observe "not found" once its blocked read re-checks the row's committed state - never a stale
- * "active" read. See README.md ("Concurrency: active-warehouse race").
+ * <p>Three concurrency/policy details live in README.md rather than here, since each needs the
+ * full before/after reasoning a short comment can't carry: why the active-warehouse check uses
+ * {@link WarehouseStore#lockActiveByBusinessUnitCode} instead of a plain read ("Concurrency:
+ * active-warehouse race"); why rules 1/2 filter to active-only warehouses via {@link #activeOnly}
+ * but rule 3 deliberately doesn't ("Assignment lifecycle policy"); and why {@link #activeOnly} and
+ * {@code CreateWarehouseUseCase} both take {@link WarehouseStore#lockForActivation} ("Concurrency:
+ * warehouse reactivation race"). {@link FulfilmentAssignmentStore#existsExact} is unfiltered by
+ * design too: it must catch a duplicate against any historical row, not just active ones, or the
+ * database's unique constraint would reject it first as a raw conflict instead of a clean 409.
  */
 @ApplicationScoped
 public class AssignWarehouseToProductForStoreUseCase implements AssignWarehouseToProductForStoreOperation {
@@ -81,22 +76,25 @@ public class AssignWarehouseToProductForStoreUseCase implements AssignWarehouseT
 
     fulfilmentAssignmentStore.acquireAssignmentLocks(storeId, productId, warehouseBusinessUnitCode);
 
-    Set<String> warehousesForProduct =
-        fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(storeId, productId);
-    if (warehousesForProduct.contains(warehouseBusinessUnitCode)) {
+    if (fulfilmentAssignmentStore.existsExact(storeId, productId, warehouseBusinessUnitCode)) {
       throw new DuplicateFulfilmentAssignmentException(storeId, productId, warehouseBusinessUnitCode);
     }
-    if (warehousesForProduct.size() + 1 > MAX_WAREHOUSES_PER_PRODUCT_PER_STORE) {
+
+    Set<String> activeWarehousesForProduct =
+        activeOnly(fulfilmentAssignmentStore.distinctWarehousesForStoreAndProduct(storeId, productId));
+    if (activeWarehousesForProduct.size() + 1 > MAX_WAREHOUSES_PER_PRODUCT_PER_STORE) {
       throw new ProductWarehouseLimitExceededException(
           storeId, productId, MAX_WAREHOUSES_PER_PRODUCT_PER_STORE);
     }
 
-    Set<String> warehousesForStore = fulfilmentAssignmentStore.distinctWarehousesForStore(storeId);
-    if (!warehousesForStore.contains(warehouseBusinessUnitCode)
-        && warehousesForStore.size() + 1 > MAX_WAREHOUSES_PER_STORE) {
+    Set<String> activeWarehousesForStore = activeOnly(fulfilmentAssignmentStore.distinctWarehousesForStore(storeId));
+    if (!activeWarehousesForStore.contains(warehouseBusinessUnitCode)
+        && activeWarehousesForStore.size() + 1 > MAX_WAREHOUSES_PER_STORE) {
       throw new StoreWarehouseLimitExceededException(storeId, MAX_WAREHOUSES_PER_STORE);
     }
 
+    // Rule 3 is scoped by business-unit-code identity, not filtered by "currently active" - see
+    // the class Javadoc.
     Set<Long> productsForWarehouse =
         fulfilmentAssignmentStore.distinctProductsForWarehouse(warehouseBusinessUnitCode);
     if (!productsForWarehouse.contains(productId)
@@ -115,5 +113,18 @@ public class AssignWarehouseToProductForStoreUseCase implements AssignWarehouseT
     fulfilmentAssignmentStore.create(assignment);
 
     return assignment;
+  }
+
+  private Set<String> activeOnly(Set<String> warehouseBusinessUnitCodes) {
+    Set<String> active = new HashSet<>();
+    for (String code : warehouseBusinessUnitCodes) {
+      // See the class Javadoc / README.md ("warehouse reactivation race") for why this lock is
+      // needed before the plain read below.
+      warehouseStore.lockForActivation(code);
+      if (warehouseStore.findActiveByBusinessUnitCode(code) != null) {
+        active.add(code);
+      }
+    }
+    return active;
   }
 }

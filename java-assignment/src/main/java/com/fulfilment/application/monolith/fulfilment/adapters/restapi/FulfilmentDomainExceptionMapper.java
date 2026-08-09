@@ -1,8 +1,8 @@
 package com.fulfilment.application.monolith.fulfilment.adapters.restapi;
 
+import com.fulfilment.application.monolith.common.ApiError;
 import com.fulfilment.application.monolith.fulfilment.domain.exceptions.FulfilmentDomainException;
 import com.fulfilment.application.monolith.fulfilment.domain.exceptions.FulfilmentValidationException;
-import com.fulfilment.application.monolith.warehouses.adapters.restapi.ApiError;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
@@ -10,8 +10,9 @@ import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
 /**
- * Mirrors {@code WarehouseDomainExceptionMapper} exactly, reusing the same {@link ApiError} body
- * shape so the whole API has one stable error contract, not one per module.
+ * Mirrors {@code WarehouseDomainExceptionMapper} exactly, both mapping to the shared {@link
+ * ApiError} body (owned by {@code common}, not by either module) so the whole API has one stable
+ * error contract, not one per module.
  */
 @Provider
 public class FulfilmentDomainExceptionMapper implements ExceptionMapper<FulfilmentDomainException> {

@@ -48,6 +48,16 @@ public class FulfilmentAssignmentRepository
   }
 
   @Override
+  public boolean existsExact(Long storeId, Long productId, String warehouseBusinessUnitCode) {
+    return count(
+            "storeId = ?1 and productId = ?2 and warehouseBusinessUnitCode = ?3",
+            storeId,
+            productId,
+            warehouseBusinessUnitCode)
+        > 0;
+  }
+
+  @Override
   public Set<String> distinctWarehousesForStoreAndProduct(Long storeId, Long productId) {
     return new HashSet<>(
         getEntityManager()

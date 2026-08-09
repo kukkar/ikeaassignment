@@ -7,11 +7,10 @@ import java.util.Set;
 /**
  * Persistence port for fulfilment assignments.
  *
- * <p>The three "distinct" query methods return the actual distinct set, not just a count: every
- * one of the three business limits is small (2, 3, and 5 respectively), so the set itself is
- * always tiny once the invariant holds, and having the set - not just its size - lets a single
- * query answer both "is this warehouse/product already counted" (membership) and "how many are
- * there" (size) for the use case, instead of two separate queries.
+ * <p>The three "distinct" queries return the actual set (not just a count), and every row
+ * regardless of warehouse status - this port has no notion of "active"; filtering for the three
+ * business limits is {@code AssignWarehouseToProductForStoreUseCase}'s job, see README.md
+ * ("Assignment lifecycle policy").
  */
 public interface FulfilmentAssignmentStore {
 
@@ -24,6 +23,9 @@ public interface FulfilmentAssignmentStore {
   List<FulfilmentAssignment> listByStore(Long storeId);
 
   List<FulfilmentAssignment> listByStoreAndProduct(Long storeId, Long productId);
+
+  /** Whether a row already exists for this exact store+product+warehouse-code triple, any warehouse status. */
+  boolean existsExact(Long storeId, Long productId, String warehouseBusinessUnitCode);
 
   /** Distinct warehouse business unit codes currently assigned to this store+product pair. */
   Set<String> distinctWarehousesForStoreAndProduct(Long storeId, Long productId);

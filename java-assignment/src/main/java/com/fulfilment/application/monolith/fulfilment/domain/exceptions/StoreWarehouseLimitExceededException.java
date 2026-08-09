@@ -1,6 +1,6 @@
 package com.fulfilment.application.monolith.fulfilment.domain.exceptions;
 
-import com.fulfilment.application.monolith.warehouses.domain.exceptions.DomainErrorType;
+import com.fulfilment.application.monolith.common.DomainErrorType;
 
 /** Rule 2: a store may be fulfilled by at most N distinct warehouses in total. */
 public class StoreWarehouseLimitExceededException extends FulfilmentDomainException {

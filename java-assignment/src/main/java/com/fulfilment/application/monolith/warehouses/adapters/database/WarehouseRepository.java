@@ -12,6 +12,14 @@ import java.util.List;
 @ApplicationScoped
 public class WarehouseRepository implements WarehouseStore, PanacheRepository<DbWarehouse> {
 
+  // Two-integer-key pg_advisory_xact_lock keyspace, distinct from both the single-bigint form
+  // lockActiveUsageByLocation already uses (a different overload entirely, per PostgreSQL's
+  // advisory-lock documentation) and from FulfilmentAssignmentRepository's own two-integer-key
+  // locks (LOCK_CLASS_STORE=9001/STORE_PRODUCT=9002/WAREHOUSE=9003) - a distinct class number
+  // keeps this keyspace from ever colliding with theirs, even though both use the two-integer
+  // form.
+  private static final int CODE_ACTIVATION_LOCK_CLASS = 8001;
+
   @Override
   public List<Warehouse> getAll() {
     return find("archivedAt is null").stream().map(DbWarehouse::toWarehouse).toList();
@@ -55,6 +63,15 @@ public class WarehouseRepository implements WarehouseStore, PanacheRepository<Db
     List<DbWarehouse> activeAtLocation = find("location = ?1 and archivedAt is null", locationIdentifier).list();
     int activeCapacity = activeAtLocation.stream().mapToInt(w -> w.capacity).sum();
     return new LocationUsage(activeAtLocation.size(), activeCapacity);
+  }
+
+  @Override
+  public void lockForActivation(String businessUnitCode) {
+    getEntityManager()
+        .createNativeQuery("SELECT pg_advisory_xact_lock(?1, hashtext(?2))")
+        .setParameter(1, CODE_ACTIVATION_LOCK_CLASS)
+        .setParameter(2, businessUnitCode)
+        .getSingleResult();
   }
 
   @Override

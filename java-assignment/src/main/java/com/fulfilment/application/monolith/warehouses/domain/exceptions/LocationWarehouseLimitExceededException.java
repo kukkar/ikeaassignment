@@ -1,5 +1,7 @@
 package com.fulfilment.application.monolith.warehouses.domain.exceptions;
 
+import com.fulfilment.application.monolith.common.DomainErrorType;
+
 /** Raised when a location has already reached its maximum number of active warehouses. */
 public class LocationWarehouseLimitExceededException extends WarehouseDomainException {
 

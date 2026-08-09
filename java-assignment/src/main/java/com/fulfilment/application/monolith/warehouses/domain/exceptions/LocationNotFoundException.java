@@ -1,5 +1,7 @@
 package com.fulfilment.application.monolith.warehouses.domain.exceptions;
 
+import com.fulfilment.application.monolith.common.DomainErrorType;
+
 /** Raised for null, blank, or unknown location identifiers, consistently. */
 public class LocationNotFoundException extends WarehouseDomainException {
 
