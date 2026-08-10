@@ -3,6 +3,7 @@ package com.fulfilment.application.monolith.products;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.core.IsNot.not;
+import static org.hamcrest.Matchers.equalTo;
 
 import io.quarkus.test.junit.QuarkusTest;
 import java.util.Map;
@@ -64,5 +65,84 @@ public class ProductEndpointTest {
             containsString("TONSTAD"),
             containsString("KALLAX"),
             containsString("BESTÅ"));
+  }
+
+  @Test
+  public void testGetSingleProductReturnsTheProduct() {
+    given().when().get("product/1").then().statusCode(200).body("name", equalTo("TONSTAD"));
+  }
+
+  @Test
+  public void testGetSingleProductThatDoesNotExistReturns404() {
+    given().when().get("product/999999999").then().statusCode(404);
+  }
+
+  @Test
+  public void testCreateProductWithIdSetIsRejected() {
+    given()
+        .contentType("application/json")
+        .body(Map.of("id", 999999999, "name", "SHOULD-NOT-BE-CREATED"))
+        .when()
+        .post("product")
+        .then()
+        .statusCode(422);
+  }
+
+  @Test
+  public void testUpdateProductAppliesEveryField() {
+    long scratchId =
+        given()
+            .contentType("application/json")
+            .body(Map.of("name", "PRODUCT-UPDATE-TEST"))
+            .when()
+            .post("product")
+            .then()
+            .statusCode(201)
+            .extract()
+            .jsonPath()
+            .getLong("id");
+
+    try {
+      given()
+          .contentType("application/json")
+          .body(
+              Map.of(
+                  "name", "PRODUCT-UPDATE-TEST-RENAMED",
+                  "description", "a description",
+                  "price", 19.99,
+                  "stock", 7))
+          .when()
+          .put("product/" + scratchId)
+          .then()
+          .statusCode(200)
+          .body("name", equalTo("PRODUCT-UPDATE-TEST-RENAMED"))
+          .body("description", equalTo("a description"))
+          .body("price", equalTo(19.99f))
+          .body("stock", equalTo(7));
+    } finally {
+      given().when().delete("product/" + scratchId);
+    }
+  }
+
+  @Test
+  public void testUpdateProductWithoutNameIsRejected() {
+    given()
+        .contentType("application/json")
+        .body(Map.of("description", "no name supplied"))
+        .when()
+        .put("product/1")
+        .then()
+        .statusCode(422);
+  }
+
+  @Test
+  public void testUpdateProductThatDoesNotExistReturns404() {
+    given()
+        .contentType("application/json")
+        .body(Map.of("name", "DOES-NOT-EXIST"))
+        .when()
+        .put("product/999999999")
+        .then()
+        .statusCode(404);
   }
 }

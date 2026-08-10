@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: java-assignment
+
+jobs:
+  verify:
+    name: Build, test, coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: java-assignment/pom.xml
+
+      # Docker is preinstalled and running on ubuntu-latest runners; Quarkus Dev Services uses it
+      # to start PostgreSQL automatically for the same tests that need it locally - no separate
+      # postgres service container is configured, so this matches `./mvnw clean verify` run
+      # locally exactly.
+      - name: Build, test, and verify (unit + integration + JaCoCo 80% gate)
+        run: ./mvnw --batch-mode --no-transfer-progress clean verify
+
+      - name: Upload JaCoCo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: java-assignment/target/site/jacoco
+          if-no-files-found: warn
+          retention-days: 14
